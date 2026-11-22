@@ -61,12 +61,16 @@ class SubscriptionService(BaseModuleService):
             self._write_subscription_record(entry_id, entry)
 
         if action == "审批通过":
-            # 联动增强：创建用量初始化记录
-            from app.services.data_manager import write_usage
+            # 联动增强：创建用量初始化记录（经用量台账在途 WAL，恢复不漏记）
+            from app.services import usage_ledger
             from app.store import store as s
 
-            billing_data = {
+            usage_rows = s.rows("usage_billing")
+            billing_id = max((int(r.get("id", 0)) for r in usage_rows), default=0) + 1
+            usage_ledger.apply_live_write({
+                "usage_id": billing_id,
                 "subscription_id": entry_id,
+                "record_no": f"USAG-{billing_id:04d}",
                 "applicant": entry.get("申请方"),
                 "api_name": entry.get("订阅API"),
                 "call_count": 0,
@@ -74,10 +78,7 @@ class SubscriptionService(BaseModuleService):
                 "amount": 0,
                 "billing_cycle": self._current_billing_cycle(),
                 "settlement_status": "计量中",
-            }
-            usage_rows = s.rows("usage_billing")
-            billing_id = max((int(r.get("id", 0)) for r in usage_rows), default=0) + 1
-            write_usage(billing_id, billing_data)
+            }, increment={"call_count": 0, "data_rows": 0, "amount": 0}, is_new=True)
 
             # 联动增强：审批通过后自动创建限流策略
             rate_rows = s.rows("rate_limiter")

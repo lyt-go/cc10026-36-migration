@@ -27,8 +27,8 @@ class UsageBillingService(BaseModuleService):
 
     def record_usage(self, api_name: str, caller: str, call_count: int = 1,
                      data_rows: int = 0, amount: float = 0.0) -> dict[str, Any]:
-        """记录一次API调用用量。"""
-        from app.services.data_manager import write_usage
+        """记录一次API调用用量。持久化经用量台账在途 WAL，恢复不漏记。"""
+        from app.services import usage_ledger
         from app.store import store as s
 
         rows = s.rows(self.MODULE)
@@ -43,8 +43,8 @@ class UsageBillingService(BaseModuleService):
                 row["调用次数"] = str(old_count + call_count)
                 row["数据行数"] = str(old_rows + data_rows)
                 row["费用金额"] = old_amount + amount
-                write_usage(row.get("id", 0), {
-                    "usage_id": row.get("id"),
+                usage_ledger.apply_live_write({
+                    "usage_id": row.get("id", 0),
                     "record_no": row.get("记录编号"),
                     "caller": caller,
                     "api_name": api_name,
@@ -53,7 +53,8 @@ class UsageBillingService(BaseModuleService):
                     "amount": old_amount + amount,
                     "billing_cycle": billing_cycle,
                     "settlement_status": row.get("status"),
-                })
+                }, increment={"call_count": call_count, "data_rows": data_rows,
+                              "amount": amount}, is_new=False)
                 return row
 
         # 新记录
@@ -73,7 +74,7 @@ class UsageBillingService(BaseModuleService):
             "abnormal": False,
         }
         rows.append(new_record)
-        write_usage(new_id, {
+        usage_ledger.apply_live_write({
             "usage_id": new_id,
             "record_no": f"USAG-{new_id:04d}",
             "caller": caller,
@@ -83,7 +84,8 @@ class UsageBillingService(BaseModuleService):
             "amount": amount,
             "billing_cycle": billing_cycle,
             "settlement_status": self.STATUS_ORDER[0],
-        })
+        }, increment={"call_count": call_count, "data_rows": data_rows,
+                      "amount": amount}, is_new=True)
         return new_record
 
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
@@ -94,9 +96,10 @@ class UsageBillingService(BaseModuleService):
         result = super().run_action(entry_id, action)
 
         if action == "完成结算" and entry:
-            from app.services.data_manager import settle_billing
+            from app.services import usage_ledger
             billing_cycle = entry.get("计费周期", self._current_billing_cycle())
-            settlement = settle_billing(billing_cycle, use_auto_settlement=True)
+            # 结算与查询共用用量台账确认视图；并存期间冲突会被拒绝并可对照
+            settlement = usage_ledger.settle_cycle(billing_cycle, auto_settlement=True)
 
             # 联动增强：结算完成写入调用审计记录
             from app.services.data_manager import write_audit, DATA_ROOT

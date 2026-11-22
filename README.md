@@ -77,5 +77,25 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 用量台账迁移流水线
+
+`backend/app/services/usage_ledger.py` 把 `data/usage/` 下按记录分散保存的历史用量
+JSON 和 `_settlement_<账期>.json` 结算汇总迁入 SQLite 台账
+（`data/ledger/usage_ledger.db`），数据库与旧目录并存期间提供一致读写：
+
+- 迁移按账期推进：扫描 → 装载 → 校验 → 切换读取，状态落库可断点恢复；
+  已结（含汇总）与未结账期均可迁入，原明细身份、结算状态与汇总引用保留。
+- 写新用量先记在途 WAL，恢复时重放，不漏记不重记；切换后的增量计入
+  新写入层（delta），确认后可按原记录查到应收金额与层次。
+- 并存期间查询与结算只使用同一账期双方相符的确认视图；冲突时
+  `/api/ledger/reconcile/<账期>` 给出双方视图对照，结算拒绝放行。
+
+接口：`POST /api/ledger/migrate/<账期>`、`GET /api/ledger/migration`、
+`GET /api/ledger/query/<账期>`、`GET /api/ledger/reconcile/<账期>`、
+`POST /api/ledger/settle/<账期>`、`POST /api/ledger/recover`。
+
+测试：`python3 tests/test_usage_ledger_migration.py`（迁入已结/未结账期各一份，
+分别在写新用量、生成结算、切换读取阶段中止一次并核对恢复结果）。
+
 领域：数据工程
 子方向：数据分析与数据应用
